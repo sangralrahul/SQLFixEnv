@@ -1,0 +1,99 @@
+name: SQLFixEnv
+version: "1.0.0"
+description: >
+  An OpenEnv environment where AI agents fix broken SQL queries against a real
+  SQLite database. Tasks range from simple syntax errors (easy) to complex
+  subquery logic (hard). Rewards are dense partial signals based on multiple
+  correctness checks, making the environment well-suited for RL post-training.
+
+author: SANGRALRAHUL
+tags:
+  - openenv
+  - sql
+  - database
+  - debugging
+  - rl-training
+
+sdk: docker
+
+interface:
+  reset:
+    method: POST
+    path: /reset
+    request:
+      task_id:
+        type: string
+        required: false
+    response:
+      session_id: {type: string}
+      observation: {type: object}
+
+  step:
+    method: POST
+    path: /step
+    request:
+      session_id: {type: string, required: true}
+      fixed_sql: {type: string, required: true}
+    response:
+      observation: {type: object}
+      reward: {type: float, range: [0.05, 0.95]}
+      done: {type: boolean}
+      info: {type: object}
+
+  state:
+    method: GET
+    path: /state/{session_id}
+    response:
+      type: object
+
+action_space:
+  type: text
+  fields:
+    fixed_sql:
+      type: string
+      description: Corrected SQL query
+
+observation_space:
+  type: object
+  fields:
+    task_id:          {type: string}
+    difficulty:       {type: string, enum: [easy, medium, hard]}
+    buggy_sql:        {type: string}
+    task_description: {type: string}
+    error_hint:       {type: string}
+    schema:           {type: string}
+    attempt:          {type: integer}
+    max_attempts:     {type: integer}
+
+reward:
+  type: dense
+  range: [0.05, 0.95]
+  description: >
+    Composite score from 4 checks: (1) correct row count 25%,
+    (2) correct columns 25%, (3) no SQL error 25%,
+    (4) data correctness 25%. Provides partial credit.
+
+tasks:
+  - id: easy_syntax
+    difficulty: easy
+    description: Fix SELCT/GRUP syntax errors in a GROUP BY query
+  - id: easy_filter
+    difficulty: easy
+    description: Fix reversed WHERE condition in a filter query
+  - id: medium_join
+    difficulty: medium
+    description: Fix missing JOIN to projects table
+  - id: medium_aggregate
+    difficulty: medium
+    description: Fix wrong aggregation function SUM vs AVG
+  - id: hard_subquery
+    difficulty: hard
+    description: Fix correlated subquery referencing wrong table
+
+episode:
+  max_steps: 5
+  termination:
+    - condition: score >= 0.94
+      description: Agent achieved near-perfect score
+    - condition: step_count >= max_steps
+      description: Attempts exhausted
