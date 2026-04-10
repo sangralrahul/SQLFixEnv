@@ -1,5 +1,4 @@
 """
-
 SQLFixEnv FastAPI Server
 OpenEnv-compatible REST API for the SQL Query Optimizer environment.
 """
@@ -10,6 +9,11 @@ from pydantic import BaseModel
 from typing import Optional
 import sqlite3
 import uvicorn
+
+# ✅ MAIN FUNCTION AT TOP (IMPORTANT FOR VALIDATOR)
+def main():
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
+
 
 try:
     from environment import SQLFixEnv, SCHEMA_SQL
@@ -107,9 +111,6 @@ def get_history():
     return {"history": env.history, "steps": env.steps, "total_reward": env.total_reward}
 
 
-def main():
-    import uvicorn
-    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
-
+# ✅ ENTRY POINT AT BOTTOM (REQUIRED)
 if __name__ == "__main__":
     main()
