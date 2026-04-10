@@ -1,99 +1,85 @@
 name: SQLFixEnv
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  An OpenEnv environment where AI agents fix broken SQL queries against a real
-  SQLite database. Tasks range from simple syntax errors (easy) to complex
-  subquery logic (hard). Rewards are dense partial signals based on multiple
-  correctness checks, making the environment well-suited for RL post-training.
+  An advanced reinforcement learning environment where AI agents fix broken SQL queries
+  against a real multi-table SQLite database. Features 5 difficulty levels (easy → master),
+  partial reward scoring, multi-table JOINs, subqueries, CTEs, and window functions.
 
 author: SANGRALRAHUL
+license: MIT
 tags:
-  - openenv
   - sql
+  - reinforcement-learning
+  - nlp
+  - code-repair
   - database
-  - debugging
-  - rl-training
+  - openenv
 
-sdk: docker
+environment:
+  type: text
+  action_space: natural_language_sql
+  observation_space: structured_text
 
-interface:
+difficulty_levels:
+  - easy: "Single table queries, keyword typos"
+  - medium: "WHERE clauses, GROUP BY, HAVING, aggregations"
+  - hard: "Multi-table JOINs, table/column name errors"
+  - expert: "Subqueries, complex multi-joins"
+  - master: "CTEs, window functions, PARTITION BY"
+
+reward:
+  type: multi_dimensional
+  max_reward: 1.0
+  components:
+    syntax: 0.5
+    row_match: 0.3
+    column_match: 0.2
+  partial_credit: true
+
+database:
+  type: SQLite (in-memory)
+  tables:
+    - employees (10 rows)
+    - departments (5 rows)
+    - projects (5 rows)
+    - assignments (11 rows)
+    - salaries (10 rows)
+
+tasks:
+  total: 10
+  per_level: 2
+  max_steps_per_episode: 5
+
+api:
+  base_url: https://SANGRALRAHUL-sqlfixenv.hf.space
+  endpoints:
+    reset: POST /reset
+    step: POST /step
+    tasks: GET /tasks
+    schema: GET /schema
+    health: GET /health
+
+endpoints:
   reset:
     method: POST
     path: /reset
-    request:
-      task_id:
-        type: string
-        required: false
-    response:
-      session_id: {type: string}
-      observation: {type: object}
+    body:
+      task_id: integer (optional, 1-10)
+    returns: observation with broken query, level, description, hint
 
   step:
     method: POST
     path: /step
-    request:
-      session_id: {type: string, required: true}
-      fixed_sql: {type: string, required: true}
-    response:
-      observation: {type: object}
-      reward: {type: float, range: [0.05, 0.95]}
-      done: {type: boolean}
-      info: {type: object}
+    body:
+      action: string (SQL query to fix)
+    returns: reward, reward_breakdown, feedback, agent_result, done
 
-  state:
+  tasks:
     method: GET
-    path: /state/{session_id}
-    response:
-      type: object
+    path: /tasks
+    returns: list of all 10 tasks with levels and hints
 
-action_space:
-  type: text
-  fields:
-    fixed_sql:
-      type: string
-      description: Corrected SQL query
-
-observation_space:
-  type: object
-  fields:
-    task_id:          {type: string}
-    difficulty:       {type: string, enum: [easy, medium, hard]}
-    buggy_sql:        {type: string}
-    task_description: {type: string}
-    error_hint:       {type: string}
-    schema:           {type: string}
-    attempt:          {type: integer}
-    max_attempts:     {type: integer}
-
-reward:
-  type: dense
-  range: [0.05, 0.95]
-  description: >
-    Composite score from 4 checks: (1) correct row count 25%,
-    (2) correct columns 25%, (3) no SQL error 25%,
-    (4) data correctness 25%. Provides partial credit.
-
-tasks:
-  - id: easy_syntax
-    difficulty: easy
-    description: Fix SELCT/GRUP syntax errors in a GROUP BY query
-  - id: easy_filter
-    difficulty: easy
-    description: Fix reversed WHERE condition in a filter query
-  - id: medium_join
-    difficulty: medium
-    description: Fix missing JOIN to projects table
-  - id: medium_aggregate
-    difficulty: medium
-    description: Fix wrong aggregation function SUM vs AVG
-  - id: hard_subquery
-    difficulty: hard
-    description: Fix correlated subquery referencing wrong table
-
-episode:
-  max_steps: 5
-  termination:
-    - condition: score >= 0.94
-      description: Agent achieved near-perfect score
-    - condition: step_count >= max_steps
-      description: Attempts exhausted
+  schema:
+    method: GET
+    path: /schema
+    returns: full database schema for all 5 tables

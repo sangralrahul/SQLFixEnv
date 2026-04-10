@@ -1,400 +1,385 @@
 """
-SQLFixEnv — Core Environment
-An OpenEnv environment where AI agents fix broken SQL queries.
-Real SQLite execution, dense partial rewards, 5 difficulty levels.
+SQLFixEnv - Advanced SQL Query Optimizer Environment
+A reinforcement learning environment where agents fix broken SQL queries
+against a real SQLite database with 5 difficulty levels.
 """
 
 import sqlite3
-import textwrap
-import uuid
+import json
+import re
+import difflib
 from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# Database setup — creates an in-memory SQLite DB with realistic schema
-# ---------------------------------------------------------------------------
+# ── Database Schema ──────────────────────────────────────────────────────────
 
 SCHEMA_SQL = """
-CREATE TABLE employees (
+CREATE TABLE IF NOT EXISTS employees (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    department TEXT NOT NULL,
-    salary REAL NOT NULL,
-    hire_date TEXT NOT NULL,
+    department_id INTEGER,
+    salary REAL,
+    hire_date TEXT,
     manager_id INTEGER
 );
 
-CREATE TABLE departments (
+CREATE TABLE IF NOT EXISTS departments (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    budget REAL NOT NULL,
-    location TEXT NOT NULL
+    budget REAL,
+    location TEXT
 );
 
-CREATE TABLE projects (
+CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    department_id INTEGER NOT NULL,
-    start_date TEXT NOT NULL,
+    department_id INTEGER,
+    start_date TEXT,
     end_date TEXT,
-    budget REAL NOT NULL
+    budget REAL
 );
 
-CREATE TABLE employee_projects (
-    employee_id INTEGER NOT NULL,
-    project_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    hours_allocated INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS assignments (
+    employee_id INTEGER,
+    project_id INTEGER,
+    role TEXT,
+    hours_allocated INTEGER,
+    PRIMARY KEY (employee_id, project_id)
 );
 
-INSERT INTO departments VALUES
-    (1, 'Engineering', 500000, 'San Francisco'),
-    (2, 'Marketing', 200000, 'New York'),
-    (3, 'Sales', 300000, 'Chicago'),
-    (4, 'HR', 150000, 'Austin');
-
-INSERT INTO employees VALUES
-    (1, 'Alice Johnson', 'Engineering', 95000, '2019-03-15', NULL),
-    (2, 'Bob Smith', 'Engineering', 85000, '2020-07-01', 1),
-    (3, 'Carol White', 'Marketing', 75000, '2018-11-20', NULL),
-    (4, 'David Brown', 'Sales', 70000, '2021-01-10', NULL),
-    (5, 'Eve Davis', 'Engineering', 90000, '2019-06-01', 1),
-    (6, 'Frank Miller', 'HR', 65000, '2022-02-14', NULL),
-    (7, 'Grace Wilson', 'Marketing', 80000, '2020-09-30', 3),
-    (8, 'Henry Taylor', 'Sales', 72000, '2021-05-20', 4),
-    (9, 'Iris Anderson', 'Engineering', 88000, '2020-03-01', 1),
-    (10, 'Jack Thomas', 'Sales', 68000, '2022-08-15', 4);
-
-INSERT INTO projects VALUES
-    (1, 'Platform Rebuild', 1, '2023-01-01', '2023-12-31', 150000),
-    (2, 'Marketing Campaign', 2, '2023-03-01', '2023-06-30', 50000),
-    (3, 'Sales Automation', 3, '2023-02-01', NULL, 80000),
-    (4, 'HR Portal', 4, '2023-04-01', '2023-09-30', 40000),
-    (5, 'AI Integration', 1, '2023-06-01', NULL, 200000);
-
-INSERT INTO employee_projects VALUES
-    (1, 1, 'Lead', 40), (2, 1, 'Developer', 35),
-    (5, 1, 'Developer', 30), (9, 1, 'Developer', 35),
-    (1, 5, 'Lead', 20), (2, 5, 'Developer', 25),
-    (3, 2, 'Lead', 40), (7, 2, 'Analyst', 30),
-    (4, 3, 'Lead', 40), (8, 3, 'Analyst', 35),
-    (6, 4, 'Lead', 40);
+CREATE TABLE IF NOT EXISTS salaries (
+    id INTEGER PRIMARY KEY,
+    employee_id INTEGER,
+    amount REAL,
+    effective_date TEXT,
+    bonus REAL DEFAULT 0
+);
 """
 
-EXPECTED_RESULTS = {
-    "easy_syntax": [
-        ("Engineering", 3), ("HR", 1), ("Marketing", 2), ("Sales", 3)
-    ],
-    "easy_filter": [
-        (1, "Alice Johnson", "Engineering", 95000.0),
-        (5, "Eve Davis", "Engineering", 90000.0),
-        (9, "Iris Anderson", "Engineering", 88000.0),
-    ],
-    "medium_join": [
-        ("Alice Johnson", "Platform Rebuild", "Lead"),
-        ("Alice Johnson", "AI Integration", "Lead"),
-        ("Bob Smith", "Platform Rebuild", "Developer"),
-        ("Bob Smith", "AI Integration", "Developer"),
-        ("Eve Davis", "Platform Rebuild", "Developer"),
-        ("Iris Anderson", "Platform Rebuild", "Developer"),
-        ("Iris Anderson", "AI Integration", None),  # flexible
-    ],
-    "medium_aggregate": [
-        ("Engineering", 4, 89500.0),
-        ("HR", 1, 65000.0),
-        ("Marketing", 2, 77500.0),
-        ("Sales", 3, 70000.0),
-    ],
-    "hard_subquery": [
-        (1, "Alice Johnson", "Engineering", 95000.0),
-        (5, "Eve Davis", "Engineering", 90000.0),
-        (9, "Iris Anderson", "Engineering", 88000.0),
-    ],
-}
+SEED_SQL = """
+INSERT OR IGNORE INTO departments VALUES
+(1,'Engineering',500000,'San Francisco'),
+(2,'Marketing',200000,'New York'),
+(3,'Sales',300000,'Chicago'),
+(4,'HR',150000,'Austin'),
+(5,'Finance',250000,'Boston');
 
+INSERT OR IGNORE INTO employees VALUES
+(1,'Alice Chen',1,95000,'2019-03-15',NULL),
+(2,'Bob Smith',1,85000,'2020-06-01',1),
+(3,'Carol White',2,75000,'2018-11-20',NULL),
+(4,'David Lee',3,70000,'2021-01-10',NULL),
+(5,'Eve Johnson',1,90000,'2019-08-22',1),
+(6,'Frank Brown',4,65000,'2022-03-01',NULL),
+(7,'Grace Kim',5,80000,'2020-09-15',NULL),
+(8,'Henry Davis',2,72000,'2021-05-30',3),
+(9,'Iris Wilson',3,68000,'2022-01-15',4),
+(10,'Jack Taylor',1,88000,'2019-12-01',1);
 
-def _make_db() -> sqlite3.Connection:
+INSERT OR IGNORE INTO projects VALUES
+(1,'Apollo',1,'2023-01-01','2023-12-31',120000),
+(2,'Beacon',2,'2023-03-01','2023-09-30',80000),
+(3,'Catalyst',1,'2023-06-01','2024-06-01',200000),
+(4,'Delta',3,'2023-02-15','2023-11-30',60000),
+(5,'Echo',4,'2023-04-01','2023-10-31',40000);
+
+INSERT OR IGNORE INTO assignments VALUES
+(1,1,'Lead',40),(2,1,'Developer',35),(5,1,'Developer',30),
+(3,2,'Manager',40),(8,2,'Analyst',35),
+(1,3,'Architect',20),(2,3,'Developer',40),(10,3,'Developer',40),
+(4,4,'Manager',40),(9,4,'Analyst',35),
+(6,5,'Coordinator',40);
+
+INSERT OR IGNORE INTO salaries VALUES
+(1,1,95000,'2023-01-01',5000),
+(2,2,85000,'2023-01-01',3000),
+(3,3,75000,'2023-01-01',2000),
+(4,4,70000,'2023-01-01',1500),
+(5,5,90000,'2023-01-01',4000),
+(6,6,65000,'2023-01-01',1000),
+(7,7,80000,'2023-01-01',2500),
+(8,8,72000,'2023-01-01',1800),
+(9,9,68000,'2023-01-01',1200),
+(10,10,88000,'2023-01-01',3500);
+"""
+
+# ── Tasks: 5 Difficulty Levels ───────────────────────────────────────────────
+
+TASKS = [
+    # ── LEVEL 1: Easy – single table, simple fixes ──
+    {
+        "id": 1,
+        "level": "easy",
+        "description": "Fix the query to get all employee names and salaries from the employees table, ordered by salary descending.",
+        "broken_query": "SELCT name, salaray FROM employes ORDER BY salaray DESK",
+        "correct_query": "SELECT name, salary FROM employees ORDER BY salary DESC",
+        "hint": "Check spelling of SELECT, column names, table name, and DESC keyword.",
+        "max_reward": 1.0,
+    },
+    {
+        "id": 2,
+        "level": "easy",
+        "description": "Fix the query to count total employees in each department (show department_id and count).",
+        "broken_query": "SELECT department_id, CONT(*) AS total FORM employees GRUP BY department_id",
+        "correct_query": "SELECT department_id, COUNT(*) AS total FROM employees GROUP BY department_id",
+        "hint": "Fix COUNT, FROM, and GROUP BY keywords.",
+        "max_reward": 1.0,
+    },
+
+    # ── LEVEL 2: Medium – WHERE clauses, aggregations ──
+    {
+        "id": 3,
+        "level": "medium",
+        "description": "Fix the query to get employees with salary above 80000 hired after 2019-01-01.",
+        "broken_query": "SELECT name, salary, hire_date FROM employees WERE salary > 80000 AND hire_date > '2019-01-01' OREDER BY hire_date",
+        "correct_query": "SELECT name, salary, hire_date FROM employees WHERE salary > 80000 AND hire_date > '2019-01-01' ORDER BY hire_date",
+        "hint": "Fix WHERE and ORDER BY keywords.",
+        "max_reward": 1.0,
+    },
+    {
+        "id": 4,
+        "level": "medium",
+        "description": "Fix the query to get the average salary per department, only for departments with average salary above 75000.",
+        "broken_query": "SELECT department_id, AVG(salary) as avg_sal FROM employees GROUP BY department_id HAVING AVG(salaray) > 75000 ORDER BY avg_sal DESK",
+        "correct_query": "SELECT department_id, AVG(salary) as avg_sal FROM employees GROUP BY department_id HAVING AVG(salary) > 75000 ORDER BY avg_sal DESC",
+        "hint": "Fix the typo in AVG(salary) inside HAVING and the sort direction.",
+        "max_reward": 1.0,
+    },
+
+    # ── LEVEL 3: Hard – JOINs ──
+    {
+        "id": 5,
+        "level": "hard",
+        "description": "Fix the JOIN query to get employee names with their department names.",
+        "broken_query": "SELECT e.name, d.name as dept_name FORM employees e INNER JION departments d ON e.department_id = d.id ORDER BY d.name",
+        "correct_query": "SELECT e.name, d.name as dept_name FROM employees e INNER JOIN departments d ON e.department_id = d.id ORDER BY d.name",
+        "hint": "Fix FROM and JOIN keywords.",
+        "max_reward": 1.0,
+    },
+    {
+        "id": 6,
+        "level": "hard",
+        "description": "Fix the query to get employees and their project names using assignments table.",
+        "broken_query": "SELECT e.name, p.name as project FROM employees e JOIN assigments a ON e.id = a.employe_id JOIN projects p ON a.project_id = p.id",
+        "correct_query": "SELECT e.name, p.name as project FROM employees e JOIN assignments a ON e.id = a.employee_id JOIN projects p ON a.project_id = p.id",
+        "hint": "Fix the table name 'assignments' and column name 'employee_id'.",
+        "max_reward": 1.0,
+    },
+
+    # ── LEVEL 4: Expert – subqueries, multi-join ──
+    {
+        "id": 7,
+        "level": "expert",
+        "description": "Fix the query to get employees who earn more than the average salary of their department.",
+        "broken_query": "SELECT e.name, e.salary, e.department_id FROM employees e WHERE e.salary > (SELECT AVG(salary) FROM employees WHERE department_id = e.department_id) ORDRE BY e.department_id, e.salaray DESC",
+        "correct_query": "SELECT e.name, e.salary, e.department_id FROM employees e WHERE e.salary > (SELECT AVG(salary) FROM employees WHERE department_id = e.department_id) ORDER BY e.department_id, e.salary DESC",
+        "hint": "Fix ORDER BY keyword and salary column name in the ORDER BY clause.",
+        "max_reward": 1.0,
+    },
+    {
+        "id": 8,
+        "level": "expert",
+        "description": "Fix the query to get department names with their total project budgets and number of projects.",
+        "broken_query": "SELECT d.name, COUNT(p.id) as num_projects, SUM(p.budget) as total_budget FROM departments d LEFT JION projects p ON d.id = p.department_id GRUP BY d.id, d.name OREDER BY total_budget DESC",
+        "correct_query": "SELECT d.name, COUNT(p.id) as num_projects, SUM(p.budget) as total_budget FROM departments d LEFT JOIN projects p ON d.id = p.department_id GROUP BY d.id, d.name ORDER BY total_budget DESC",
+        "hint": "Fix JOIN, GROUP BY, and ORDER BY keywords.",
+        "max_reward": 1.0,
+    },
+
+    # ── LEVEL 5: Master – CTEs, window functions ──
+    {
+        "id": 9,
+        "level": "master",
+        "description": "Fix the CTE query to rank employees by salary within each department using window functions.",
+        "broken_query": "WITH ranked AS (SELECT name, salary, department_id, RANK() OVER (PARTITON BY department_id ORDRE BY salary DESC) as rnk FROM employees) SELECT * FORM ranked WHERE rnk <= 2",
+        "correct_query": "WITH ranked AS (SELECT name, salary, department_id, RANK() OVER (PARTITION BY department_id ORDER BY salary DESC) as rnk FROM employees) SELECT * FROM ranked WHERE rnk <= 2",
+        "hint": "Fix PARTITION, ORDER BY inside window function, and FROM keyword.",
+        "max_reward": 1.0,
+    },
+    {
+        "id": 10,
+        "level": "master",
+        "description": "Fix the complex query to get employees with total compensation (salary + bonus), their department, and project count.",
+        "broken_query": "SELECT e.name, d.name as department, (s.amount + s.bonus) as total_comp, COUNT(DISTINCT a.project_id) as num_projects FROM employees e JOIN departmens d ON e.id = d.id JOIN salarys s ON e.id = s.employee_id LEFT JOIN assigments a ON e.id = a.employee_id GRUP BY e.id, e.name, d.name, s.amount, s.bonus ODER BY total_comp DESC",
+        "correct_query": "SELECT e.name, d.name as department, (s.amount + s.bonus) as total_comp, COUNT(DISTINCT a.project_id) as num_projects FROM employees e JOIN departments d ON e.department_id = d.id JOIN salaries s ON e.id = s.employee_id LEFT JOIN assignments a ON e.id = a.employee_id GROUP BY e.id, e.name, d.name, s.amount, s.bonus ORDER BY total_comp DESC",
+        "hint": "Fix table names (departments, salaries, assignments), JOIN condition (department_id), GROUP BY and ORDER BY keywords.",
+        "max_reward": 1.0,
+    },
+]
+
+# ── Reward Logic ─────────────────────────────────────────────────────────────
+
+def get_db():
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    conn.executescript(SEED_SQL)
     return conn
 
 
-# ---------------------------------------------------------------------------
-# Task bank
-# ---------------------------------------------------------------------------
-
-TASKS: dict[str, dict[str, Any]] = {
-    # ── EASY 1 — Syntax error ────────────────────────────────────────────
-    "easy_syntax": {
-        "difficulty": "easy",
-        "description": (
-            "Count the number of employees in each department. "
-            "Return department name and count, ordered by department name. "
-            "The query has a syntax error — fix it."
-        ),
-        "buggy_sql": textwrap.dedent("""\
-            SELCT department, COUNT(*) as employee_count
-            FROM employees
-            GRUP BY department
-            ORDER BY department;
-        """),
-        "error_hint": "Error: near 'SELCT': syntax error (SELCT should be SELECT, GRUP should be GROUP)",
-        "expected_columns": ["department", "employee_count"],
-        "expected_rows": 4,
-    },
-
-    # ── EASY 2 — Wrong filter ────────────────────────────────────────────
-    "easy_filter": {
-        "difficulty": "easy",
-        "description": (
-            "Find all employees in the Engineering department with salary above 85000. "
-            "Return id, name, department, salary ordered by salary descending. "
-            "The WHERE clause has the wrong condition — fix it."
-        ),
-        "buggy_sql": textwrap.dedent("""\
-            SELECT id, name, department, salary
-            FROM employees
-            WHERE department = 'Engineering' AND salary < 85000
-            ORDER BY salary DESC;
-        """),
-        "error_hint": "Query returns wrong rows — salary condition is reversed (< should be >)",
-        "expected_columns": ["id", "name", "department", "salary"],
-        "expected_rows": 3,
-    },
-
-    # ── MEDIUM 1 — Missing JOIN ───────────────────────────────────────────
-    "medium_join": {
-        "difficulty": "medium",
-        "description": (
-            "Find all Engineering employees and the projects they work on. "
-            "Return employee name, project name, and their role. "
-            "The JOIN is missing — fix it."
-        ),
-        "buggy_sql": textwrap.dedent("""\
-            SELECT e.name, p.name as project_name, ep.role
-            FROM employees e
-            JOIN employee_projects ep ON e.id = ep.employee_id
-            WHERE e.department = 'Engineering'
-            ORDER BY e.name, p.name;
-        """),
-        "error_hint": "Error: no such column: p.name — missing JOIN to projects table",
-        "expected_columns": ["name", "project_name", "role"],
-        "expected_rows": 6,
-    },
-
-    # ── MEDIUM 2 — Wrong aggregation ─────────────────────────────────────
-    "medium_aggregate": {
-        "difficulty": "medium",
-        "description": (
-            "For each department, find the number of employees and average salary. "
-            "Return department, employee_count, avg_salary ordered by department. "
-            "The aggregation function is wrong — fix it."
-        ),
-        "buggy_sql": textwrap.dedent("""\
-            SELECT department,
-                   COUNT(*) as employee_count,
-                   SUM(salary) as avg_salary
-            FROM employees
-            GROUP BY department
-            ORDER BY department;
-        """),
-        "error_hint": "avg_salary is showing SUM instead of AVG — wrong aggregation function",
-        "expected_columns": ["department", "employee_count", "avg_salary"],
-        "expected_rows": 4,
-    },
-
-    # ── HARD — Subquery ───────────────────────────────────────────────────
-    "hard_subquery": {
-        "difficulty": "hard",
-        "description": (
-            "Find all employees whose salary is above the average salary of their department. "
-            "Return id, name, department, salary ordered by salary descending. "
-            "The subquery is referencing the wrong table — fix it."
-        ),
-        "buggy_sql": textwrap.dedent("""\
-            SELECT e.id, e.name, e.department, e.salary
-            FROM employees e
-            WHERE e.salary > (
-                SELECT AVG(salary)
-                FROM departments
-                WHERE name = e.department
-            )
-            ORDER BY e.salary DESC;
-        """),
-        "error_hint": "Subquery uses wrong table 'departments' — should use 'employees' to calculate avg salary per department",
-        "expected_columns": ["id", "name", "department", "salary"],
-        "expected_rows": 3,
-    },
-}
+def normalize_query(q: str) -> str:
+    return re.sub(r'\s+', ' ', q.strip().upper())
 
 
-# ---------------------------------------------------------------------------
-# Grader
-# ---------------------------------------------------------------------------
-
-def _safe_score(raw: float) -> float:
-    """Map [0,1] strictly into (0.05, 0.95) — never 0.0 or 1.0."""
-    return round(0.05 + raw * 0.90, 4)
-
-
-def grade(task_id: str, fixed_sql: str) -> dict[str, Any]:
-    task = TASKS.get(task_id)
-    if task is None:
-        return {"score": 0.05, "error": f"Unknown task '{task_id}'", "details": {}}
-
-    conn = _make_db()
+def execute_query(conn, query: str):
     try:
-        cursor = conn.execute(fixed_sql)
-        rows = cursor.fetchall()
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-    except Exception as exc:
-        conn.close()
-        return {"score": 0.05, "error": f"SQL Error: {exc}", "details": {"rows": [], "columns": []}}
-    finally:
-        conn.close()
-
-    checks = {}
-    score_parts = []
-
-    # Check 1: correct number of rows (25%)
-    expected_rows = task["expected_rows"]
-    row_ok = len(rows) == expected_rows
-    checks["row_count"] = {"got": len(rows), "expected": expected_rows, "passed": row_ok}
-    score_parts.append(0.25 if row_ok else 0.0)
-
-    # Check 2: correct columns present (25%)
-    expected_cols = [c.lower() for c in task["expected_columns"]]
-    got_cols = [c.lower() for c in columns]
-    cols_ok = all(ec in got_cols for ec in expected_cols)
-    checks["columns"] = {"got": got_cols, "expected": expected_cols, "passed": cols_ok}
-    score_parts.append(0.25 if cols_ok else 0.0)
-
-    # Check 3: no SQL error (25%)
-    checks["no_error"] = {"passed": True}
-    score_parts.append(0.25)
-
-    # Check 4: data correctness — spot check key values (25%)
-    data_ok = False
-    if rows and task_id in EXPECTED_RESULTS:
-        expected = EXPECTED_RESULTS[task_id]
-        # Check first row matches
-        try:
-            first_row = tuple(rows[0])
-            first_expected = tuple(expected[0])
-            data_ok = len(rows) == len(expected) and str(first_row[0]) == str(first_expected[0])
-        except Exception:
-            data_ok = False
-    checks["data_correctness"] = {"passed": data_ok}
-    score_parts.append(0.25 if data_ok else 0.0)
-
-    raw_score = sum(score_parts)
-    score = _safe_score(raw_score)
-
-    return {
-        "score": score,
-        "error": None,
-        "details": {
-            "checks": checks,
-            "rows_returned": len(rows),
-            "sample_rows": [list(r) for r in rows[:3]],
-            "columns": columns,
-        },
-    }
+        cur = conn.execute(query)
+        rows = [dict(r) for r in cur.fetchall()]
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return {"success": True, "rows": rows, "columns": cols, "error": None}
+    except Exception as e:
+        return {"success": False, "rows": [], "columns": [], "error": str(e)}
 
 
-# ---------------------------------------------------------------------------
-# Episode / Session
-# ---------------------------------------------------------------------------
+def compute_reward(agent_result: dict, correct_result: dict, agent_query: str, correct_query: str) -> dict:
+    """
+    Multi-dimensional reward:
+    - 0.5 for executing without error
+    - 0.3 for matching result rows
+    - 0.2 for column similarity
+    Partial credit given at each stage.
+    """
+    reward = 0.0
+    breakdown = {}
 
-class Episode:
-    MAX_ATTEMPTS = 5
+    # 1. Syntax reward — did it run?
+    if agent_result["success"]:
+        reward += 0.5
+        breakdown["syntax"] = 0.5
+    else:
+        breakdown["syntax"] = 0.0
+        breakdown["rows"] = 0.0
+        breakdown["columns"] = 0.0
+        return {"total": 0.0, "breakdown": breakdown, "feedback": agent_result["error"]}
 
-    def __init__(self, task_id: str):
-        self.episode_id = str(uuid.uuid4())
-        self.task_id = task_id
-        self.attempt = 0
-        self.done = False
-        self.best_score = 0.05
-        self.history: list[dict] = []
+    # 2. Row match reward
+    agent_rows = [json.dumps(r, sort_keys=True) for r in agent_result["rows"]]
+    correct_rows = [json.dumps(r, sort_keys=True) for r in correct_result["rows"]]
 
-    def observation(self) -> dict[str, Any]:
-        task = TASKS[self.task_id]
-        return {
-            "task_id": self.task_id,
-            "difficulty": task["difficulty"],
-            "buggy_sql": task["buggy_sql"],
-            "task_description": task["description"],
-            "error_hint": task["error_hint"],
-            "schema": "Tables: employees(id,name,department,salary,hire_date,manager_id), departments(id,name,budget,location), projects(id,name,department_id,start_date,end_date,budget), employee_projects(employee_id,project_id,role,hours_allocated)",
-            "attempt": self.attempt,
-            "max_attempts": self.MAX_ATTEMPTS,
-        }
+    if agent_rows == correct_rows:
+        reward += 0.3
+        breakdown["rows"] = 0.3
+    elif set(agent_rows) == set(correct_rows):
+        reward += 0.2  # right data, wrong order
+        breakdown["rows"] = 0.2
+    elif len(agent_rows) > 0 and len(correct_rows) > 0:
+        # partial overlap
+        overlap = len(set(agent_rows) & set(correct_rows)) / max(len(correct_rows), 1)
+        partial = round(0.15 * overlap, 3)
+        reward += partial
+        breakdown["rows"] = partial
+    else:
+        breakdown["rows"] = 0.0
 
-    def step(self, fixed_sql: str) -> dict[str, Any]:
-        if self.done:
-            return {"observation": self.observation(), "reward": 0.05, "done": True, "info": {}}
-        self.attempt += 1
-        result = grade(self.task_id, fixed_sql)
-        score = result["score"]
-        if score > self.best_score:
-            self.best_score = score
-        self.done = score >= 0.94 or self.attempt >= self.MAX_ATTEMPTS
-        self.history.append({"attempt": self.attempt, "score": score, "error": result["error"]})
-        return {
-            "observation": self.observation(),
-            "reward": score,
-            "done": self.done,
-            "info": {
-                "grader_error": result["error"],
-                "details": result["details"],
-                "best_score": self.best_score,
-            },
-        }
+    # 3. Column match reward
+    agent_cols = set(c.upper() for c in agent_result["columns"])
+    correct_cols = set(c.upper() for c in correct_result["columns"])
+    if agent_cols == correct_cols:
+        reward += 0.2
+        breakdown["columns"] = 0.2
+    elif agent_cols & correct_cols:
+        partial = round(0.2 * len(agent_cols & correct_cols) / max(len(correct_cols), 1), 3)
+        reward += partial
+        breakdown["columns"] = partial
+    else:
+        breakdown["columns"] = 0.0
 
-    def state(self) -> dict[str, Any]:
-        return {
-            "episode_id": self.episode_id,
-            "task_id": self.task_id,
-            "attempt": self.attempt,
-            "max_attempts": self.MAX_ATTEMPTS,
-            "done": self.done,
-            "best_score": self.best_score,
-            "history": self.history,
-        }
+    feedback = "Perfect!" if reward >= 1.0 else f"Partial score: {round(reward, 3)}"
+    return {"total": round(reward, 3), "breakdown": breakdown, "feedback": feedback}
 
 
-# ---------------------------------------------------------------------------
-# Environment
-# ---------------------------------------------------------------------------
+# ── Environment Class ─────────────────────────────────────────────────────────
 
 class SQLFixEnv:
     def __init__(self):
-        self._sessions: dict[str, Episode] = {}
+        self.tasks = TASKS
+        self.current_task_idx = 0
+        self.current_task = None
+        self.done = False
+        self.total_reward = 0.0
+        self.steps = 0
+        self.history = []
+        self._conn = get_db()
 
-    def reset(self, task_id: str | None = None) -> dict[str, Any]:
-        if task_id is None:
-            task_id = "easy_syntax"
-        if task_id not in TASKS:
-            raise ValueError(f"Unknown task_id '{task_id}'. Valid: {list(TASKS)}")
-        ep = Episode(task_id)
-        self._sessions[ep.episode_id] = ep
-        return {"session_id": ep.episode_id, "observation": ep.observation()}
+    def reset(self, task_id: int | None = None) -> dict:
+        self._conn = get_db()
+        self.done = False
+        self.total_reward = 0.0
+        self.steps = 0
+        self.history = []
 
-    def step(self, session_id: str, fixed_sql: str) -> dict[str, Any]:
-        ep = self._sessions.get(session_id)
-        if ep is None:
-            raise KeyError(f"session_id '{session_id}' not found.")
-        return ep.step(fixed_sql)
+        if task_id is not None:
+            matches = [t for t in self.tasks if t["id"] == task_id]
+            self.current_task = matches[0] if matches else self.tasks[0]
+        else:
+            self.current_task = self.tasks[self.current_task_idx % len(self.tasks)]
+            self.current_task_idx += 1
 
-    def state(self, session_id: str) -> dict[str, Any]:
-        ep = self._sessions.get(session_id)
-        if ep is None:
-            raise KeyError(f"session_id '{session_id}' not found.")
-        return ep.state()
+        return {
+            "task_id": self.current_task["id"],
+            "level": self.current_task["level"],
+            "description": self.current_task["description"],
+            "broken_query": self.current_task["broken_query"],
+            "hint": self.current_task["hint"],
+            "observation": f"Fix this SQL query:\n{self.current_task['broken_query']}",
+            "done": False,
+        }
 
-    @staticmethod
-    def list_tasks() -> list[dict[str, str]]:
+    def step(self, action: str) -> dict:
+        if self.done:
+            return {"error": "Episode done. Call reset()."}
+
+        self.steps += 1
+        task = self.current_task
+
+        # Execute agent query
+        agent_result = execute_query(self._conn, action)
+
+        # Execute correct query
+        correct_result = execute_query(self._conn, task["correct_query"])
+
+        # Compute reward
+        reward_info = compute_reward(agent_result, correct_result, action, task["correct_query"])
+        reward = reward_info["total"]
+        self.total_reward += reward
+
+        # Episode ends on perfect score or max 5 attempts
+        self.done = reward >= 1.0 or self.steps >= 5
+
+        step_result = {
+            "task_id": task["id"],
+            "level": task["level"],
+            "action": action,
+            "reward": reward,
+            "reward_breakdown": reward_info["breakdown"],
+            "feedback": reward_info["feedback"],
+            "agent_result": agent_result,
+            "correct_result": correct_result if reward < 1.0 else None,
+            "done": self.done,
+            "steps": self.steps,
+            "total_reward": round(self.total_reward, 3),
+            "success": reward >= 1.0,
+        }
+
+        self.history.append(step_result)
+        return step_result
+
+    def get_all_tasks(self) -> list:
         return [
-            {"task_id": tid, "difficulty": t["difficulty"], "description": t["description"]}
-            for tid, t in TASKS.items()
+            {
+                "id": t["id"],
+                "level": t["level"],
+                "description": t["description"],
+                "broken_query": t["broken_query"],
+                "hint": t["hint"],
+            }
+            for t in self.tasks
         ]
+
+    def get_schema(self) -> dict:
+        cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        schema = {}
+        for table in tables:
+            cur = self._conn.execute(f"PRAGMA table_info({table})")
+            schema[table] = [{"name": r[1], "type": r[2]} for r in cur.fetchall()]
+        return schema

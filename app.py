@@ -1,71 +1,94 @@
 """
-SQLFixEnv — FastAPI HTTP server
+SQLFixEnv FastAPI Server
+OpenEnv-compatible REST API for the SQL Query Optimizer environment.
 """
-from __future__ import annotations
-from typing import Any
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from typing import Optional
+import uvicorn
+
 from environment import SQLFixEnv
 
-app = FastAPI(title="SQLFixEnv", version="1.0.0",
-              description="OpenEnv environment where AI agents fix broken SQL queries.")
+app = FastAPI(
+    title="SQLFixEnv",
+    description="Advanced SQL Query Optimizer RL Environment — Fix broken SQL queries across 5 difficulty levels with partial reward scoring.",
+    version="2.0.0",
+)
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-_env = SQLFixEnv()
+# Global env instance
+env = SQLFixEnv()
+
+
+class ResetRequest(BaseModel):
+    task_id: Optional[int] = None
 
 
 class StepRequest(BaseModel):
-    session_id: str = Field(...)
-    fixed_sql: str = Field(...)
+    action: str
+
+
+@app.get("/")
+def root():
+    return {
+        "name": "SQLFixEnv",
+        "version": "2.0.0",
+        "description": "SQL Query Optimizer RL Environment with 5 difficulty levels",
+        "levels": ["easy", "medium", "hard", "expert", "master"],
+        "total_tasks": len(env.tasks),
+        "endpoints": ["/reset", "/step", "/tasks", "/schema", "/health"],
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "env": "SQLFixEnv", "version": "1.0.0"}
-
-
-@app.get("/tasks")
-def list_tasks():
-    return {"tasks": _env.list_tasks()}
+    return {"status": "ok", "tasks": len(env.tasks)}
 
 
 @app.post("/reset")
-async def reset(request: Request):
-    task_id = None
-    try:
-        body = await request.json()
-        if isinstance(body, dict):
-            task_id = body.get("task_id", None)
-    except Exception:
-        task_id = None
-    try:
-        return _env.reset(task_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def reset(req: ResetRequest = ResetRequest()):
+    obs = env.reset(task_id=req.task_id)
+    return obs
 
 
 @app.post("/step")
 def step(req: StepRequest):
-    try:
-        return _env.step(req.session_id, req.fixed_sql)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not req.action or not req.action.strip():
+        raise HTTPException(status_code=400, detail="Action (SQL query) cannot be empty.")
+    result = env.step(req.action.strip())
+    return result
 
 
-@app.get("/state/{session_id}")
-def state(session_id: str):
-    try:
-        return _env.state(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+@app.get("/tasks")
+def get_tasks():
+    return {"tasks": env.get_all_tasks(), "total": len(env.tasks)}
 
 
-def main():
-    uvicorn.run("app:app", host="0.0.0.0", port=7860, workers=2)
+@app.get("/tasks/{task_id}")
+def get_task(task_id: int):
+    tasks = [t for t in env.get_all_tasks() if t["id"] == task_id]
+    if not tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found.")
+    return tasks[0]
+
+
+@app.get("/schema")
+def get_schema():
+    return {"schema": env.get_schema()}
+
+
+@app.get("/history")
+def get_history():
+    return {"history": env.history, "steps": env.steps, "total_reward": env.total_reward}
 
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run("app:app", host="0.0.0.0", port=7860, reload=False)
