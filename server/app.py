@@ -11,7 +11,10 @@ from typing import Optional
 import sqlite3
 import uvicorn
 
-from environment import SQLFixEnv, SCHEMA_SQL
+try:
+    from environment import SQLFixEnv, SCHEMA_SQL
+except ImportError:
+    pass
 
 app = FastAPI(
     title="SQLFixEnv",
