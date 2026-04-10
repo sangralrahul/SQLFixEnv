@@ -7,9 +7,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+import sqlite3
 import uvicorn
 
-from environment import SQLFixEnv
+from environment import SQLFixEnv, SCHEMA_SQL
 
 app = FastAPI(
     title="SQLFixEnv",
@@ -82,7 +83,19 @@ def get_task(task_id: int):
 
 @app.get("/schema")
 def get_schema():
-    return {"schema": env.get_schema()}
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA_SQL)
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        schema = {}
+        for table in tables:
+            cur2 = conn.execute(f"PRAGMA table_info({table})")
+            schema[table] = [{"name": r[1], "type": r[2]} for r in cur2.fetchall()]
+        conn.close()
+        return {"schema": schema, "tables": list(schema.keys())}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/history")
