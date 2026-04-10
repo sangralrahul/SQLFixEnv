@@ -6,7 +6,7 @@ colorTo: green
 sdk: docker
 pinned: true
 license: mit
-short_description: Advanced SQL Query Optimizer RL Environment — 5 difficulty levels
+short_description: SQL Query Optimizer RL Environment
 ---
 
 # 🗄️ SQLFixEnv — SQL Query Optimizer RL Environment
