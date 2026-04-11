@@ -1,110 +1,72 @@
 """
-SQLFixEnv FastAPI Server
-OpenEnv-compatible REST API for the SQL Query Optimizer environment.
+SQLDebugEnv — FastAPI HTTP server
+Same structure as CodeDebugEnv which passed Phase 1 + Phase 2.
 """
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
-import sqlite3
+from __future__ import annotations
+from typing import Any
 import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from environment import SQLDebugEnv
 
-from environment import SQLFixEnv, SCHEMA_SQL
+app = FastAPI(title="SQLDebugEnv", version="1.0.0",
+              description="OpenEnv environment where AI agents fix broken SQL queries.")
 
-app = FastAPI(
-    title="SQLFixEnv",
-    description="Advanced SQL Query Optimizer RL Environment — Fix broken SQL queries across 5 difficulty levels with partial reward scoring.",
-    version="2.0.0",
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Global env instance
-env = SQLFixEnv()
-
-
-class ResetRequest(BaseModel):
-    task_id: Optional[int] = None
+_env = SQLDebugEnv()
 
 
 class StepRequest(BaseModel):
-    action: str
-
-
-@app.get("/")
-def root():
-    return {
-        "name": "SQLFixEnv",
-        "version": "2.0.0",
-        "description": "SQL Query Optimizer RL Environment with 5 difficulty levels",
-        "levels": ["easy", "medium", "hard", "expert", "master"],
-        "total_tasks": len(env.tasks),
-        "endpoints": ["/reset", "/step", "/tasks", "/schema", "/health"],
-    }
+    session_id: str = Field(...)
+    fixed_code: str = Field(...)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "tasks": len(env.tasks)}
+    return {"status": "ok", "env": "SQLDebugEnv", "version": "1.0.0"}
+
+
+@app.get("/tasks")
+def list_tasks():
+    return {"tasks": _env.list_tasks()}
 
 
 @app.post("/reset")
-def reset(req: ResetRequest = ResetRequest()):
-    obs = env.reset(task_id=req.task_id)
-    return obs
+async def reset(request: Request):
+    task_id = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            task_id = body.get("task_id", None)
+    except Exception:
+        task_id = None
+    try:
+        return _env.reset(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/step")
 def step(req: StepRequest):
-    if not req.action or not req.action.strip():
-        raise HTTPException(status_code=400, detail="Action (SQL query) cannot be empty.")
-    result = env.step(req.action.strip())
-    return result
-
-
-@app.get("/tasks")
-def get_tasks():
-    return {"tasks": env.get_all_tasks(), "total": len(env.tasks)}
-
-
-@app.get("/tasks/{task_id}")
-def get_task(task_id: int):
-    tasks = [t for t in env.get_all_tasks() if t["id"] == task_id]
-    if not tasks:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found.")
-    return tasks[0]
-
-
-@app.get("/schema")
-def get_schema():
     try:
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA_SQL)
-        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cur.fetchall()]
-        schema = {}
-        for table in tables:
-            cur2 = conn.execute(f"PRAGMA table_info({table})")
-            schema[table] = [{"name": r[1], "type": r[2]} for r in cur2.fetchall()]
-        conn.close()
-        return {"schema": schema, "tables": list(schema.keys())}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return _env.step(req.session_id, req.fixed_code)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/history")
-def get_history():
-    return {"history": env.history, "steps": env.steps, "total_reward": env.total_reward}
+@app.get("/state/{session_id}")
+def state(session_id: str):
+    try:
+        return _env.state(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def main():
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    uvicorn.run("app:app", host="0.0.0.0", port=7860, workers=2)
 
-if __name__ == '__main__':
-    main() 
+
+if __name__ == "__main__":
+    main()
